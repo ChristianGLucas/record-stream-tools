@@ -26,12 +26,10 @@ func ParseJsonArrayItems(ctx context.Context, ax axiom.Context, input *gen.JsonA
 	tok, err := dec.Token()
 	if err != nil {
 		if errors.Is(err, io.EOF) {
-			// Empty or whitespace-only document: treated as a structural
-			// problem (there is no array at all), not a valid empty array.
-			return &gen.JsonArrayParseResult{
-				ItemsJson: "[]",
-				Error:     &gen.JsonArrayParseError{Code: "INVALID_ARGUMENT", Message: "empty document: expected a top-level JSON array"},
-			}, nil
+			// Empty or whitespace-only document: "nothing to report", not a
+			// structural problem -- matches StreamJsonArrayItems' identical
+			// treatment of a frameless/blank input.
+			return &gen.JsonArrayParseResult{ItemsJson: "[]"}, nil
 		}
 		return &gen.JsonArrayParseResult{
 			ItemsJson: "[]",

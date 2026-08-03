@@ -60,9 +60,24 @@ func TestParseJsonArrayItems_MalformedElementIsWholeDocumentError(t *testing.T) 
 	}
 }
 
-func TestParseJsonArrayItems_EmptyDocumentIsError(t *testing.T) {
+func TestParseJsonArrayItems_EmptyDocumentIsValidEmptyNotError(t *testing.T) {
+	// Matches StreamJsonArrayItems' identical treatment of blank input as
+	// "nothing to report" rather than a structural problem.
 	res := parseJsonArray(t, &gen.JsonArrayParseInput{Text: ""})
-	if res.GetError() == nil || res.GetError().GetCode() != "INVALID_ARGUMENT" {
-		t.Fatalf("expected INVALID_ARGUMENT for empty document, got %+v", res.GetError())
+	if res.GetError() != nil {
+		t.Fatalf("expected no error for empty document, got %+v", res.GetError())
+	}
+	if res.GetItemsParsed() != 0 || res.GetItemsJson() != "[]" {
+		t.Errorf("expected empty result, got %+v", res)
+	}
+}
+
+func TestParseJsonArrayItems_WhitespaceOnlyDocumentIsValidEmptyNotError(t *testing.T) {
+	res := parseJsonArray(t, &gen.JsonArrayParseInput{Text: "   \n\t "})
+	if res.GetError() != nil {
+		t.Fatalf("expected no error for whitespace-only document, got %+v", res.GetError())
+	}
+	if res.GetItemsParsed() != 0 || res.GetItemsJson() != "[]" {
+		t.Errorf("expected empty result, got %+v", res)
 	}
 }

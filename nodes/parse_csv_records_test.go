@@ -283,6 +283,29 @@ func TestParseCsvRecords_RaggedRowIsSkippedNotMisassigned(t *testing.T) {
 	}
 }
 
+func TestParseCsvRecords_DuplicateHeaderIsWholeDocumentErrorNotSilentOverwrite(t *testing.T) {
+	// Regression: two "amount" columns (e.g. debit/credit) with distinct
+	// per-row values must never silently collapse into one key.
+	text := "date,amount,amount\n2026-01-01,10.00,20.00\n"
+	res := parseCsv(t, &gen.CsvParseInput{Text: text, HasHeader: true})
+	if res.GetError() == nil || res.GetError().GetCode() != "INVALID_ARGUMENT" {
+		t.Fatalf("expected INVALID_ARGUMENT for duplicate header, got %+v", res.GetError())
+	}
+	if res.GetRecordsJson() != "[]" || res.GetRowsParsed() != 0 {
+		t.Errorf("expected nothing attempted, got records_json=%q rows_parsed=%d", res.GetRecordsJson(), res.GetRowsParsed())
+	}
+}
+
+func TestParseCsvRecords_DuplicateExplicitHeaderIsWholeDocumentError(t *testing.T) {
+	res := parseCsv(t, &gen.CsvParseInput{
+		Text:            "10.00,20.00\n",
+		ExplicitHeaders: []string{"amount", "amount"},
+	})
+	if res.GetError() == nil || res.GetError().GetCode() != "INVALID_ARGUMENT" {
+		t.Fatalf("expected INVALID_ARGUMENT for duplicate explicit_headers, got %+v", res.GetError())
+	}
+}
+
 func TestParseCsvRecords_UnterminatedQuoteHeaderRowIsWholeDocumentError(t *testing.T) {
 	text := "\"unterminated\nalice,30\n"
 	res := parseCsv(t, &gen.CsvParseInput{Text: text, HasHeader: true})

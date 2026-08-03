@@ -337,15 +337,18 @@ message CsvSkippedRow {
 }
 
 // A whole-document failure -- set only when NO rows could be attempted at
-// all: a bad delimiter argument, or a syntax error in the header row itself
+// all: a bad delimiter argument, a syntax error in the header row itself
 // (which makes column names impossible to establish, and -- like any
 // unterminated quote -- may have consumed the rest of the document trying to
-// find a closing quote). Individual bad DATA rows do not set this; they
-// appear in skipped_rows instead.
+// find a closing quote), or a duplicate column name in the established
+// headers (a duplicate would silently overwrite an earlier value when
+// records are keyed by name, so it is rejected outright rather than risking
+// silent data loss). Individual bad DATA rows do not set this; they appear
+// in skipped_rows instead.
 message CsvParseError {
-  // Stable machine-readable code: "INVALID_ARGUMENT" (bad delimiter) or
-  // "PARSE_ERROR" (the header row itself failed to parse). Empty means no
-  // whole-document error occurred.
+  // Stable machine-readable code: "INVALID_ARGUMENT" (bad delimiter, or a
+  // duplicate column name in headers) or "PARSE_ERROR" (the header row
+  // itself failed to parse). Empty means no whole-document error occurred.
   string code = 1;
   // Human-readable detail.
   string message = 2;
@@ -430,7 +433,11 @@ message NdjsonParseResult {
 // an array, to parse in ONE call. See CsvParseInput's doc for why a bounded
 // unary sibling exists alongside the Stream* pipeline node.
 message JsonArrayParseInput {
-  // The full JSON document text, UTF-8.
+  // The full JSON document text, UTF-8. Empty or whitespace-only text is
+  // treated as "nothing to report" (items_parsed=0, no error), matching
+  // StreamJsonArrayItems' identical treatment of a frameless/blank input --
+  // not a structural problem, since there is no non-whitespace content to
+  // judge as array-shaped or not.
   string text = 1;
 }
 
@@ -440,9 +447,9 @@ message JsonArrayParseInput {
 // parse -- matching StreamJsonArrayItems' identical "unrecoverable
 // mid-document" behavior, not CSV's per-row skip.
 message JsonArrayParseError {
-  // "INVALID_ARGUMENT" if the top-level value is not a JSON array,
-  // "PARSE_ERROR" if the document (or one of its elements) fails to decode.
-  // Empty means no error occurred.
+  // "INVALID_ARGUMENT" if the (non-blank) top-level value is not a JSON
+  // array, "PARSE_ERROR" if the document (or one of its elements) fails to
+  // decode. Empty means no error occurred.
   string code = 1;
   // Human-readable detail.
   string message = 2;
@@ -454,8 +461,9 @@ message JsonArrayParseResult {
   // top-level array, re-serialized). "[]" if error is set or the array was
   // empty.
   string items_json = 1;
-  // Count of elements successfully parsed. Zero and error unset means a
-  // valid empty array ("[]") was the whole document.
+  // Count of elements successfully parsed. Zero and error unset means
+  // either a valid empty array ("[]") or blank input was the whole
+  // document.
   int32 items_parsed = 2;
   // Set on any structural problem; see JsonArrayParseError. When set,
   // items_json is "[]" and items_parsed is 0 -- nothing is partially

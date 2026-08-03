@@ -71,6 +71,15 @@ func parseCsvRecords(text, delimiter string, hasHeader, trimLeadingSpace bool, e
 	if len(explicitHeaders) > 0 {
 		headers = explicitHeaders
 	}
+	if dup, ok := firstDuplicate(headers); ok {
+		return &gen.CsvParseResult{
+			RecordsJson: "[]",
+			Error: &gen.CsvParseError{
+				Code:    "INVALID_ARGUMENT",
+				Message: fmt.Sprintf("duplicate column name %q in headers -- records cannot be safely keyed by name", dup),
+			},
+		}
+	}
 
 	var records []map[string]string
 	var skipped []*gen.CsvSkippedRow
@@ -122,4 +131,19 @@ func parseCsvRecords(text, delimiter string, hasHeader, trimLeadingSpace bool, e
 		RowsParsed:  int32(len(records)),
 		SkippedRows: skipped,
 	}
+}
+
+// firstDuplicate reports the first column name that appears more than once
+// in headers. A duplicate column name would silently overwrite an earlier
+// value when building each record's map[string]string, so it is rejected
+// as a whole-document error rather than allowed to corrupt records.
+func firstDuplicate(headers []string) (string, bool) {
+	seen := make(map[string]bool, len(headers))
+	for _, h := range headers {
+		if seen[h] {
+			return h, true
+		}
+		seen[h] = true
+	}
+	return "", false
 }
