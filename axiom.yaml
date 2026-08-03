@@ -1,7 +1,7 @@
 name: christiangeorgelucas/record-stream-tools
-version: 0.2.0
+version: 0.3.0
 language: go
-description: "Incremental record-by-record streaming parsers for common wire formats (NDJSON, CSV, JSON arrays, log lines, SSE) — pipeline generator nodes that consume a STREAM of input frames as one continuous document (parser state carried across frames, a record may span a chunk boundary, the tail is flushed on channel close) and emit progressive output frames instead of buffering a whole document. A single input frame (the whole document at once) behaves exactly as v0.1.x."
+description: "Incremental record-by-record streaming parsers for common wire formats (NDJSON, CSV, JSON arrays, log lines, SSE) — pipeline generator nodes that consume a STREAM of input frames as one continuous document (parser state carried across frames, a record may span a chunk boundary, the tail is flushed on channel close) and emit progressive output frames instead of buffering a whole document. A single input frame (the whole document at once) behaves exactly as v0.1.x. v0.3.0 adds BOUNDED unary siblings (ParseCsvRecords, ParseNdjsonRecords, ParseJsonArrayItems) that parse a whole in-memory document in one call and return a JSON array of records/items directly — for composing with a JSON-records-based tool (e.g. a reconciliation node) inside a unary flow, where the Stream* pipeline nodes' per-frame output cannot be accumulated into one downstream message. Every cell/value the unary siblings emit is a plain string with zero numeric/boolean type inference, by design — unlike a columnar-format converter that auto-types by column, typing a value is always the caller's decision, so a decimal amount string is never silently routed through a float type."
 nodes:
     - name: StreamNdjsonRecords
       description: "Parse newline-delimited JSON (NDJSON/JSONL) as a stream of input frames making up one continuous document — a record's line may span a chunk boundary — and emit one frame per record in document order. A malformed line is reported as a per-line error frame and skipped (lines are independent); parsing continues with the next line. The last frame emitted has is_final=true. Feeding the whole document as a single frame behaves exactly as v0.1.x."
@@ -32,4 +32,19 @@ nodes:
       description: Guess which of this package's supported wire formats (ndjson, csv, json_array, sse, log_lines) a piece of text is most likely written in, using a handful of cheap structural checks, to help route it to the right Stream* node. Advisory only, not a validator.
       input: SniffFormatInput
       output: SniffFormatResult
+      type: unary
+    - name: ParseCsvRecords
+      description: "Parse a WHOLE (bounded, in-memory) CSV document in one call into a JSON array of records, one object per data row keyed by column name, every value a plain STRING (no numeric inference, ever). Handles RFC 4180 quoting, embedded newlines inside quoted fields, CRLF/LF, and a leading BOM, via the same encoding/csv engine as StreamCsvRecords. Unlike StreamCsvRecords, individual malformed or ragged (wrong column count) rows are SKIPPED and reported in skipped_rows rather than aborting the whole parse — except a genuine unterminated-quote error, which (like StreamCsvRecords) can still consume the remainder of the document; see CsvParseResult's doc. For a bounded document you can hold in memory (e.g. an uploaded statement/export) that you need as ONE JSON-records message for a downstream unary node (e.g. a reconciliation tool) in the same flow — StreamCsvRecords' per-row pipeline frames cannot be accumulated into a single message for such a consumer. Point genuinely large files at StreamCsvRecords (or a client-streamed direct invoke) instead."
+      input: CsvParseInput
+      output: CsvParseResult
+      type: unary
+    - name: ParseNdjsonRecords
+      description: "Parse a WHOLE (bounded, in-memory) NDJSON/JSONL document in one call into a JSON array collecting every line's own JSON value, in document order. Blank lines are skipped; a malformed line is individually skipped and reported in skipped_rows (lines are independent, so one bad line never aborts the rest — unlike CSV, there is no whole-document error case here). The bounded-vs-streaming tradeoff is the same as ParseCsvRecords vs StreamNdjsonRecords — see ParseCsvRecords' description."
+      input: NdjsonParseInput
+      output: NdjsonParseResult
+      type: unary
+    - name: ParseJsonArrayItems
+      description: "Parse a WHOLE (bounded, in-memory) JSON document, whose top-level value must be an array, in one call, returning its elements re-assembled as one JSON array. Unlike ParseCsvRecords/ParseNdjsonRecords, a structural problem here (not an array, or any element fails to decode) is a whole-document error, not a per-item skip — a JSON array element has no cheap resync boundary once the decoder's position is untrustworthy, matching StreamJsonArrayItems' identical 'unrecoverable mid-document' behavior. The bounded-vs-streaming tradeoff is otherwise the same as ParseCsvRecords vs StreamCsvRecords — see ParseCsvRecords' description."
+      input: JsonArrayParseInput
+      output: JsonArrayParseResult
       type: unary

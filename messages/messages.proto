@@ -285,6 +285,185 @@ message SseEventFrame {
 }
 
 // ---------------------------------------------------------------------------
+// ParseCsvRecords (bounded, unary sibling of StreamCsvRecords)
+// ---------------------------------------------------------------------------
+
+// A whole (bounded, in-memory) CSV document to parse into a JSON array of
+// records in ONE call -- for composing with a JSON-records-based tool (e.g.
+// reconcile-tools/Reconcile) inside a UNARY flow, where StreamCsvRecords'
+// per-row pipeline frames cannot be accumulated into one downstream message
+// (a pipeline node's frames are not joinable/composable into a single
+// message for a unary consumer in the same flow). For a large file where
+// buffering the whole document in memory is undesirable, use
+// StreamCsvRecords (or a client-streamed direct invoke) instead -- this node
+// is for bounded, in-flow statements/exports, not arbitrarily large files.
+message CsvParseInput {
+  // The full CSV document text, UTF-8. Unlike CsvInput, this is the WHOLE
+  // document in one field -- there is no chunk/frame concept here.
+  string text = 1;
+  // Field delimiter as a single character. Empty means the default ",".
+  string delimiter = 2;
+  // When true, the first physical row is consumed as a header row and its
+  // own values become `headers` on the output -- unless explicit_headers is
+  // also set, in which case the row is still consumed/discarded but
+  // explicit_headers' values are used instead of its content.
+  bool has_header = 3;
+  // When true, leading whitespace in each field is trimmed (encoding/csv's
+  // TrimLeadingSpace option). Defaults to false (whitespace preserved).
+  bool trim_leading_space = 4;
+  // Optional caller-supplied column names, used as every record's JSON keys
+  // instead of reading them from the document. Set this when the document
+  // has no header row at all (leave has_header false) or when it has one you
+  // want to skip past without using its literal values (set has_header true
+  // AND this). When empty and has_header is also false, column names are
+  // synthesized as "col_0", "col_1", ... from the first data row's own
+  // column count.
+  repeated string explicit_headers = 5;
+}
+
+// One row that could not be included in records_json.
+message CsvSkippedRow {
+  // 1-based data row number (the header row, if consumed, is not counted).
+  int32 row_number = 1;
+  // Human-readable reason: either a genuine CSV syntax error surfaced by the
+  // underlying parser, or a column-count mismatch against the established
+  // header width (see CsvParseResult.headers). A ragged row (different
+  // column count than the header) is deliberately treated as a SKIP here,
+  // not a silently-shifted or padded field mapping -- unlike
+  // StreamCsvRecords' `values`, this node only ever emits records keyed BY
+  // NAME, and a caller reconciling financial data must never have a value
+  // silently assigned to the wrong column name.
+  string reason = 2;
+}
+
+// A whole-document failure -- set only when NO rows could be attempted at
+// all: a bad delimiter argument, or a syntax error in the header row itself
+// (which makes column names impossible to establish, and -- like any
+// unterminated quote -- may have consumed the rest of the document trying to
+// find a closing quote). Individual bad DATA rows do not set this; they
+// appear in skipped_rows instead.
+message CsvParseError {
+  // Stable machine-readable code: "INVALID_ARGUMENT" (bad delimiter) or
+  // "PARSE_ERROR" (the header row itself failed to parse). Empty means no
+  // whole-document error occurred.
+  string code = 1;
+  // Human-readable detail.
+  string message = 2;
+}
+
+// The result of a bounded, whole-document CSV parse.
+message CsvParseResult {
+  // Every successfully parsed data row, as one JSON array of objects keyed
+  // by `headers` (column name -> value). Every value is always a JSON
+  // STRING -- no numeric/boolean/null inference is EVER performed on a cell
+  // (unlike e.g. a columnar-format converter that auto-types by column);
+  // typing a value is entirely the caller's decision downstream (a decimal
+  // amount string is never silently routed through a float type here). "[]"
+  // if error is set or there were zero parseable data rows.
+  string records_json = 1;
+  // Column names actually used as each record's JSON keys, in column order
+  // -- either the consumed header row, explicit_headers, or synthesized
+  // "col_0".."col_{N-1}" from the first data row's own width.
+  repeated string headers = 2;
+  // Count of rows successfully parsed and included in records_json.
+  int32 rows_parsed = 3;
+  // Rows excluded from records_json, in row order, with why -- so a caller
+  // can detect a half-parsed document (rows_parsed alone can't distinguish
+  // "clean 40-row file" from "40 rows attempted, 12 silently dropped").
+  // CAVEAT: a genuine unterminated-quote syntax error can make the
+  // underlying parser lose its position for the remainder of the document,
+  // silently consuming one or more subsequent rows before reaching EOF -- in
+  // that case only ONE skipped_rows entry appears even though more than one
+  // row's data was lost. This mirrors StreamCsvRecords' identical inherent
+  // limitation (documented there as "unrecoverable mid-document").
+  repeated CsvSkippedRow skipped_rows = 4;
+  // Set only on a whole-document failure; see CsvParseError. When set,
+  // records_json is "[]" and rows_parsed/skipped_rows are both empty --
+  // nothing was attempted.
+  CsvParseError error = 5;
+}
+
+// ---------------------------------------------------------------------------
+// ParseNdjsonRecords (bounded, unary sibling of StreamNdjsonRecords)
+// ---------------------------------------------------------------------------
+
+// A whole (bounded, in-memory) NDJSON/JSONL document to parse in ONE call.
+// See CsvParseInput's doc for why a bounded unary sibling exists alongside
+// the Stream* pipeline node.
+message NdjsonParseInput {
+  // The full NDJSON document text, UTF-8. One JSON value per non-blank
+  // line; blank lines are skipped.
+  string text = 1;
+}
+
+// One line that could not be included in records_json.
+message NdjsonSkippedLine {
+  // 1-based source line number.
+  int32 line_number = 1;
+  // Human-readable JSON parse error for this line.
+  string reason = 2;
+}
+
+// The result of a bounded, whole-document NDJSON parse. Lines are
+// independent of one another (unlike a CSV row, one malformed line can never
+// desynchronize the rest of the document), so every malformed line is
+// individually skipped and parsing always continues to the end -- there is
+// no whole-document error concept for this node.
+message NdjsonParseResult {
+  // Every successfully parsed line's JSON value, collected into one JSON
+  // array, in document order. Each element is exactly that line's own JSON
+  // text (object, array, string, number, bool, or null -- whatever it was)
+  // -- never re-typed or reshaped.
+  string records_json = 1;
+  // Count of non-blank lines successfully parsed and included in
+  // records_json.
+  int32 rows_parsed = 2;
+  // Non-blank lines that failed to parse as JSON, in line order.
+  repeated NdjsonSkippedLine skipped_rows = 3;
+}
+
+// ---------------------------------------------------------------------------
+// ParseJsonArrayItems (bounded, unary sibling of StreamJsonArrayItems)
+// ---------------------------------------------------------------------------
+
+// A whole (bounded, in-memory) JSON document, whose top-level value must be
+// an array, to parse in ONE call. See CsvParseInput's doc for why a bounded
+// unary sibling exists alongside the Stream* pipeline node.
+message JsonArrayParseInput {
+  // The full JSON document text, UTF-8.
+  string text = 1;
+}
+
+// A whole-document failure. Unlike a CSV row, a JSON array element has no
+// cheap resync boundary once the decoder's position is untrustworthy past a
+// malformed token, so any structural problem here is fatal to the whole
+// parse -- matching StreamJsonArrayItems' identical "unrecoverable
+// mid-document" behavior, not CSV's per-row skip.
+message JsonArrayParseError {
+  // "INVALID_ARGUMENT" if the top-level value is not a JSON array,
+  // "PARSE_ERROR" if the document (or one of its elements) fails to decode.
+  // Empty means no error occurred.
+  string code = 1;
+  // Human-readable detail.
+  string message = 2;
+}
+
+// The result of a bounded, whole-document JSON-array parse.
+message JsonArrayParseResult {
+  // The array's elements, re-assembled as one JSON array (== the original
+  // top-level array, re-serialized). "[]" if error is set or the array was
+  // empty.
+  string items_json = 1;
+  // Count of elements successfully parsed. Zero and error unset means a
+  // valid empty array ("[]") was the whole document.
+  int32 items_parsed = 2;
+  // Set on any structural problem; see JsonArrayParseError. When set,
+  // items_json is "[]" and items_parsed is 0 -- nothing is partially
+  // returned.
+  JsonArrayParseError error = 3;
+}
+
+// ---------------------------------------------------------------------------
 // SniffFormat (unary companion)
 // ---------------------------------------------------------------------------
 
