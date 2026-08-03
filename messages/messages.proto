@@ -1,0 +1,260 @@
+// This file defines the data contracts (messages) for your Axiom package.
+// Every node's --input and --output refers to a message defined here.
+//
+// Run `axiom create message <Name>` to scaffold a new message below.
+// Run `axiom generate` to compile these definitions into language bindings in gen/.
+//
+// DOCUMENTATION
+//   Comments written directly above a message or field declaration are extracted
+//   automatically at publish time and shown in the Axiom registry as documentation.
+//   Write your descriptions there — no separate doc files needed.
+//
+//   Leading comment  (no blank line before the declaration) → registry description ✓
+//   Detached comment (blank line before the declaration)    → ignored by registry  ✗
+//
+// This file is yours to edit. Axiom only appends new message blocks — it never
+// overwrites or removes content you have written.
+
+syntax = "proto3";
+
+package christiangeorgelucas.record_stream_tools;
+
+option go_package = ".;gen";
+
+// ---------------------------------------------------------------------------
+// StreamNdjsonRecords
+// ---------------------------------------------------------------------------
+
+// Newline-delimited JSON (NDJSON/JSONL) text to parse record-by-record. Each
+// non-blank line is expected to be one complete JSON value (object, array,
+// string, number, bool, or null); blank lines are skipped and never produce
+// a frame.
+message NdjsonInput {
+  // The full NDJSON/JSONL document text, UTF-8. Lines may be separated by
+  // "\n" or "\r\n"; a leading UTF-8 BOM and a trailing newline are both
+  // tolerated.
+  string text = 1;
+}
+
+// One parsed NDJSON record, emitted in document order. A malformed line is
+// skipped (reported as an error frame, not a crash) and parsing continues
+// with the next line, since NDJSON lines are independent of one another.
+// The platform's transport-level terminal frame carries no payload — is_final
+// is the authoritative end-of-stream signal for this node.
+message NdjsonRecordFrame {
+  // 0-based position of this frame among frames actually emitted (skipped
+  // blank lines do not consume an index).
+  int32 index = 1;
+  // 1-based source line number this record came from, for error reporting
+  // and correlating a frame back to the original document.
+  int32 line_number = 2;
+  // The record's JSON text, exactly as parsed. Empty when is_error is true.
+  string json = 3;
+  // True when this line failed to parse as valid JSON; when true, json is
+  // empty and error_message explains why. The line is skipped and parsing
+  // continues with the next one.
+  bool is_error = 4;
+  // Human-readable parse error, set only when is_error is true.
+  string error_message = 5;
+  // True on the last frame emitted for this input document (business-level
+  // signal). An input with zero non-blank lines emits exactly one frame
+  // with is_final=true and every other field at its zero value.
+  bool is_final = 6;
+}
+
+// ---------------------------------------------------------------------------
+// StreamCsvRecords
+// ---------------------------------------------------------------------------
+
+// CSV (or other delimited-text) document to parse row-by-row. Handles
+// RFC 4180 quoting, embedded newlines inside quoted fields, CRLF and LF line
+// endings, and a leading UTF-8 BOM.
+message CsvInput {
+  // The full CSV document text, UTF-8.
+  string text = 1;
+  // Field delimiter as a single character. Empty means the default ",".
+  string delimiter = 2;
+  // When true, the first row is treated as a header and used to populate
+  // each subsequent frame's `fields` map by column name. Defaults to false
+  // (proto3 zero value): every row, including the first, is then a data row
+  // and `fields` is left empty on every frame — use `values` instead.
+  bool has_header = 3;
+  // When true, leading whitespace in each field is trimmed (encoding/csv's
+  // TrimLeadingSpace option). Defaults to false (whitespace preserved).
+  bool trim_leading_space = 4;
+}
+
+// One parsed CSV data row (the header row, if any, is consumed to populate
+// `fields` on subsequent frames and never itself emitted as a frame).
+// A row-level syntax error (e.g. an unterminated quoted field) is unrecoverable
+// mid-document — byte alignment after such an error is not well-defined — so
+// StreamCsvRecords reports it as a single error frame with is_final=true and
+// stops, rather than risking silently-corrupted rows. A row with a different
+// column count than the header is NOT an error (values/fields simply reflect
+// however many columns that row actually had).
+message CsvRecordFrame {
+  // 0-based position of this frame among data-row frames actually emitted.
+  int32 index = 1;
+  // 1-based data row number, counting only data rows (the header row, if
+  // consumed, is not counted).
+  int32 row_number = 2;
+  // Column-name → value for this row, populated only when the input declared
+  // has_header=true. Empty when has_header=false. If this row has fewer
+  // columns than the header, the missing trailing columns map to ""; if it
+  // has more, the extra columns are present in `values` but have no key
+  // here (there is no header name for them).
+  map<string, string> fields = 3;
+  // The row's raw values in column order, always populated (regardless of
+  // has_header) so a headerless document is still fully usable.
+  repeated string values = 4;
+  // True when this row failed to parse as CSV; when true, fields/values are
+  // empty and error_message explains why. Parsing stops after this frame.
+  bool is_error = 5;
+  // Human-readable parse error, set only when is_error is true.
+  string error_message = 6;
+  // True on the last frame emitted for this input document. An input with
+  // zero data rows (empty text, or only a header row) emits exactly one
+  // frame with is_final=true and every other field at its zero value.
+  bool is_final = 7;
+}
+
+// ---------------------------------------------------------------------------
+// StreamJsonArrayItems
+// ---------------------------------------------------------------------------
+
+// A JSON document whose top-level value is expected to be an array. Elements
+// are tokenized and emitted one at a time as they are decoded — the document
+// is never fully unmarshaled into memory before the first frame is emitted,
+// so a large array streams progressively.
+message JsonArrayInput {
+  // The full JSON document text, UTF-8. Whitespace-only or empty text is
+  // treated as "nothing to stream" (see JsonArrayItemFrame.is_final), not an
+  // error.
+  string text = 1;
+}
+
+// One element of the top-level JSON array, in array order. A structural
+// problem — the top-level value is not an array, or an element fails to
+// parse — is unrecoverable mid-document (the decoder's position is no longer
+// trustworthy past a malformed token), so StreamJsonArrayItems reports it as
+// a single error frame with is_final=true and stops.
+message JsonArrayItemFrame {
+  // 0-based position of this element within the array.
+  int32 index = 1;
+  // The element's JSON text, exactly as it appeared in the source document
+  // (object, array, string, number, bool, or null — whatever the element
+  // was). Empty when is_error is true.
+  string json = 2;
+  // True when the top-level value was not an array, or this element failed
+  // to parse; when true, json is empty and error_message explains why.
+  bool is_error = 3;
+  // Human-readable parse error, set only when is_error is true.
+  string error_message = 4;
+  // True on the last frame emitted for this input document. A valid empty
+  // array ("[]") or whitespace-only/empty text emits exactly one frame with
+  // is_final=true and every other field at its zero value.
+  bool is_final = 5;
+}
+
+// ---------------------------------------------------------------------------
+// StreamLogLines
+// ---------------------------------------------------------------------------
+
+// Raw multi-line text (e.g. a log file) to split into individual lines.
+message LogLinesInput {
+  // The full text, UTF-8. Lines may be separated by "\n" or "\r\n"; a
+  // leading UTF-8 BOM is tolerated. There is no concept of a malformed line
+  // — every line, including an empty one, produces a frame.
+  string text = 1;
+}
+
+// One line of the input text, in document order, with its line terminator
+// stripped.
+message LogLineFrame {
+  // 0-based position of this line among all lines in the document.
+  int32 index = 1;
+  // 1-based line number, matching how line numbers are conventionally
+  // reported by editors and log viewers.
+  int32 line_number = 2;
+  // The line's text with its trailing "\n"/"\r\n" removed. May be empty
+  // (a blank line is still a line and still produces a frame).
+  string text = 3;
+  // True on the last frame emitted for this input document. Empty input
+  // text emits exactly one frame with is_final=true, line_number=1, and
+  // text="" (an empty document is treated as one empty line, matching how
+  // splitting "" on newlines yields a single empty segment).
+  bool is_final = 4;
+}
+
+// ---------------------------------------------------------------------------
+// StreamSseEvents
+// ---------------------------------------------------------------------------
+
+// A raw text/event-stream transcript (Server-Sent Events wire format) to
+// parse into individual events per the WHATWG SSE specification.
+message SseInput {
+  // The full event-stream transcript text, UTF-8.
+  string text = 1;
+}
+
+// One dispatched SSE event. Parsing follows the WHATWG spec's event-stream
+// parsing algorithm: fields are accumulated line-by-line until a blank line
+// dispatches the pending event; unrecognized field names and comment lines
+// (starting with ":") are silently ignored, exactly as the spec requires —
+// so, unlike the other nodes in this package, there is no error frame for
+// this node; the format is total by design. One deliberate deviation from a
+// live EventSource connection: if the transcript does not end with a
+// trailing blank line, any pending event with a non-empty data buffer is
+// still flushed as a final frame (a live connection would instead discard
+// it as an incomplete trailing event) — this makes hand-written or
+// truncated transcripts still yield their last event.
+message SseEventFrame {
+  // 0-based position of this event among events actually dispatched.
+  int32 index = 1;
+  // The event's id field: the last non-null "id:" value seen at or before
+  // this event's dispatch (per spec, the id buffer persists across events
+  // until overwritten). Empty if no id has been set yet.
+  string id = 2;
+  // The event's type: the value of its "event:" field, or "message" if none
+  // was set (per spec default).
+  string event = 3;
+  // The event's data, i.e. every "data:" line's value for this event joined
+  // with "\n", with the single trailing newline the spec adds removed.
+  string data = 4;
+  // The reconnection time in milliseconds from a "retry:" field seen at or
+  // before this event, if any (per spec the retry buffer persists like id).
+  // Meaningful only when retry_set is true.
+  int32 retry = 5;
+  // True when a "retry:" field with a valid non-negative integer value has
+  // been seen at or before this event; distinguishes an explicit retry:0
+  // from no retry field having been set at all.
+  bool retry_set = 6;
+  // True on the last frame emitted for this input document.
+  bool is_final = 7;
+}
+
+// ---------------------------------------------------------------------------
+// SniffFormat (unary companion)
+// ---------------------------------------------------------------------------
+
+// Arbitrary text whose likely wire format should be guessed, to route it to
+// the right Stream* node.
+message SniffFormatInput {
+  // The text to inspect. Only a prefix is actually needed for a confident
+  // guess, but the full text may be passed.
+  string text = 1;
+}
+
+// A best-effort format guess. This is advisory only — always driven by a
+// handful of cheap structural checks (never a full parse of the whole
+// document), so treat it as a routing hint, not a validation result.
+message SniffFormatResult {
+  // One of "ndjson", "csv", "json_array", "sse", "log_lines", or "unknown".
+  string format = 1;
+  // A rough confidence score in [0.0, 1.0]; higher means the structural
+  // signals were more unambiguous. Not a statistical probability.
+  double confidence = 2;
+  // A short human-readable explanation of which signal(s) drove the guess,
+  // e.g. "first 5 non-blank lines each parsed as standalone JSON values".
+  string reason = 3;
+}

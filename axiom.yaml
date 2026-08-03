@@ -1,0 +1,35 @@
+name: christiangeorgelucas/record-stream-tools
+version: 0.1.0
+language: go
+description: Incremental record-by-record streaming parsers for common wire formats (NDJSON, CSV, JSON arrays, log lines, SSE) — pipeline generator nodes that emit progressive frames instead of buffering a whole document.
+nodes:
+    - name: StreamNdjsonRecords
+      description: Parse newline-delimited JSON (NDJSON/JSONL) text and emit one frame per record in document order. A malformed line is reported as a per-line error frame and skipped (lines are independent); parsing continues with the next line. The last frame emitted has is_final=true.
+      input: NdjsonInput
+      output: NdjsonRecordFrame
+      type: pipeline
+    - name: StreamCsvRecords
+      description: Parse CSV (or other single-character-delimited) text and emit one frame per data row in document order, handling RFC 4180 quoting, embedded newlines inside quoted fields, CRLF/LF line endings, and a leading BOM. Optional header row populates a column-name map on every frame. A row-level syntax error is unrecoverable mid-document, so it is reported as a single error frame with is_final=true and parsing stops.
+      input: CsvInput
+      output: CsvRecordFrame
+      type: pipeline
+    - name: StreamJsonArrayItems
+      description: Tokenize a JSON document whose top-level value is an array and emit one frame per element as it is decoded — the array is never fully unmarshaled into memory before the first frame, so a large array streams progressively. A structural problem (not an array, or a malformed element) is unrecoverable mid-document, so it is reported as a single error frame with is_final=true and parsing stops.
+      input: JsonArrayInput
+      output: JsonArrayItemFrame
+      type: pipeline
+    - name: StreamLogLines
+      description: Split raw multi-line text into individual lines and emit one frame per line, in order, with each line's 1-based line number and its terminator stripped. Every line, including empty ones, produces a frame; there is no malformed-line concept.
+      input: LogLinesInput
+      output: LogLineFrame
+      type: pipeline
+    - name: StreamSseEvents
+      description: Parse a raw text/event-stream (Server-Sent Events) transcript per the WHATWG SSE specification and emit one frame per dispatched event, with its id/event/data/retry fields. Unrecognized field names and comment lines are silently ignored per spec, so there is no error frame for this node — the format is total by design.
+      input: SseInput
+      output: SseEventFrame
+      type: pipeline
+    - name: SniffFormat
+      description: Guess which of this package's supported wire formats (ndjson, csv, json_array, sse, log_lines) a piece of text is most likely written in, using a handful of cheap structural checks, to help route it to the right Stream* node. Advisory only, not a validator.
+      input: SniffFormatInput
+      output: SniffFormatResult
+      type: unary
