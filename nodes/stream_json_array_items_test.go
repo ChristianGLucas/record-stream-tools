@@ -243,6 +243,21 @@ func TestStreamJsonArrayItems_UTF8RuneSplitAcrossChunks(t *testing.T) {
 	}
 }
 
+func TestStreamJsonArrayItems_EmptyInputChannelYieldsNoFrames(t *testing.T) {
+	in := make(chan *gen.JsonArrayInput)
+	close(in)
+	var frames []*gen.JsonArrayItemFrame
+	if err := StreamJsonArrayItems(nil, nil, in, func(f *gen.JsonArrayItemFrame) error {
+		frames = append(frames, f)
+		return nil
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(frames) != 0 {
+		t.Fatalf("expected 0 frames for an empty request channel, got %d", len(frames))
+	}
+}
+
 func TestStreamJsonArrayItems_BOMStripped(t *testing.T) {
 	frames := collectJsonArrayItems(t, "\uFEFF[1,2]")
 	if len(frames) != 2 {

@@ -241,6 +241,21 @@ func TestStreamCsvRecords_LaterFrameConfigFieldsIgnored(t *testing.T) {
 	}
 }
 
+func TestStreamCsvRecords_EmptyInputChannelYieldsNoFrames(t *testing.T) {
+	in := make(chan *gen.CsvInput)
+	close(in)
+	var frames []*gen.CsvRecordFrame
+	if err := StreamCsvRecords(nil, nil, in, func(f *gen.CsvRecordFrame) error {
+		frames = append(frames, f)
+		return nil
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(frames) != 0 {
+		t.Fatalf("expected 0 frames for an empty request channel, got %d", len(frames))
+	}
+}
+
 func TestStreamCsvRecords_EmptyInputYieldsSingleFinalFrame(t *testing.T) {
 	frames := collectCsv(t, &gen.CsvInput{Text: ""})
 	if len(frames) != 1 {
