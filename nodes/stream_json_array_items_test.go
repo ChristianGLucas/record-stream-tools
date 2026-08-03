@@ -183,6 +183,66 @@ func TestStreamJsonArrayItems_LargeArrayOrderingAtScale(t *testing.T) {
 	}
 }
 
+// collectJsonArrayItemsMulti feeds text as SEVERAL input frames rather than
+// one, exercising the v0.2.0 stateful multi-frame path.
+func collectJsonArrayItemsMulti(t *testing.T, chunks []string) []*gen.JsonArrayItemFrame {
+	t.Helper()
+	in := make(chan *gen.JsonArrayInput, len(chunks))
+	for _, c := range chunks {
+		in <- &gen.JsonArrayInput{Text: c}
+	}
+	close(in)
+
+	var frames []*gen.JsonArrayItemFrame
+	if err := StreamJsonArrayItems(nil, nil, in, func(f *gen.JsonArrayItemFrame) error {
+		frames = append(frames, f)
+		return nil
+	}); err != nil {
+		t.Fatalf("StreamJsonArrayItems returned error: %v", err)
+	}
+	return frames
+}
+
+func TestStreamJsonArrayItems_ElementSpansChunkBoundary(t *testing.T) {
+	chunks := []string{`[{"a":1},{"a":2,"b":`, `"tail"},{"a":3}]`}
+	frames := collectJsonArrayItemsMulti(t, chunks)
+	if len(frames) != 3 {
+		t.Fatalf("expected 3 frames, got %d: %+v", len(frames), frames)
+	}
+	if frames[1].GetJson() != `{"a":2,"b":"tail"}` {
+		t.Errorf("expected the split element reassembled, got %q", frames[1].GetJson())
+	}
+	if !frames[2].GetIsFinal() {
+		t.Error("expected last frame final")
+	}
+
+	whole := chunks[0] + chunks[1]
+	n1 := collectJsonArrayItems(t, whole)
+	if len(n1) != len(frames) {
+		t.Fatalf("N=1 vs multi-frame frame count differs: %d vs %d", len(n1), len(frames))
+	}
+	for i := range n1 {
+		if n1[i].GetJson() != frames[i].GetJson() {
+			t.Errorf("frame %d differs between N=1 and multi-frame: %q vs %q", i, n1[i].GetJson(), frames[i].GetJson())
+		}
+	}
+}
+
+func TestStreamJsonArrayItems_UTF8RuneSplitAcrossChunks(t *testing.T) {
+	full := `["café"]`
+	splitAt := strings.Index(full, "\xc3") + 1
+	frames := collectJsonArrayItemsMulti(t, []string{full[:splitAt], full[splitAt:]})
+	if len(frames) != 1 {
+		t.Fatalf("expected 1 frame, got %d: %+v", len(frames), frames)
+	}
+	if frames[0].GetIsError() {
+		t.Fatalf("unexpected error (rune corrupted across chunk boundary): %q", frames[0].GetErrorMessage())
+	}
+	if frames[0].GetJson() != `"café"` {
+		t.Errorf("expected café preserved intact, got %q", frames[0].GetJson())
+	}
+}
+
 func TestStreamJsonArrayItems_BOMStripped(t *testing.T) {
 	frames := collectJsonArrayItems(t, "\uFEFF[1,2]")
 	if len(frames) != 2 {

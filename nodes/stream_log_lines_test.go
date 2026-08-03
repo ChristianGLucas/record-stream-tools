@@ -1,6 +1,7 @@
 package nodes
 
 import (
+	"strings"
 	"testing"
 
 	gen "christiangeorgelucas/record-stream-tools/gen"
@@ -113,6 +114,68 @@ func TestStreamLogLines_BOMStripped(t *testing.T) {
 	}
 	if frames[0].GetText() != "first line" {
 		t.Errorf("expected BOM stripped from first line, got %q", frames[0].GetText())
+	}
+}
+
+// collectLogLinesMulti feeds text as SEVERAL input frames rather than one,
+// exercising the v0.2.0 stateful multi-frame path.
+func collectLogLinesMulti(t *testing.T, chunks []string) []*gen.LogLineFrame {
+	t.Helper()
+	in := make(chan *gen.LogLinesInput, len(chunks))
+	for _, c := range chunks {
+		in <- &gen.LogLinesInput{Text: c}
+	}
+	close(in)
+
+	var frames []*gen.LogLineFrame
+	if err := StreamLogLines(nil, nil, in, func(f *gen.LogLineFrame) error {
+		frames = append(frames, f)
+		return nil
+	}); err != nil {
+		t.Fatalf("StreamLogLines returned error: %v", err)
+	}
+	return frames
+}
+
+func TestStreamLogLines_LineSpansChunkBoundary(t *testing.T) {
+	chunks := []string{"first\nsec", "ond\nthird\n"}
+	frames := collectLogLinesMulti(t, chunks)
+	want := []string{"first", "second", "third", ""} // trailing "\n" -> empty final segment
+	if len(frames) != len(want) {
+		t.Fatalf("expected %d frames, got %d: %+v", len(want), len(frames), frames)
+	}
+	for i, w := range want {
+		if frames[i].GetText() != w {
+			t.Errorf("frame %d: got %q, want %q", i, frames[i].GetText(), w)
+		}
+	}
+	if !frames[len(frames)-1].GetIsFinal() {
+		t.Error("expected last frame final")
+	}
+}
+
+func TestStreamLogLines_UTF8RuneSplitAcrossChunks(t *testing.T) {
+	full := "café\n"
+	splitAt := strings.Index(full, "\xc3") + 1
+	frames := collectLogLinesMulti(t, []string{full[:splitAt], full[splitAt:]})
+	want := []string{"café", ""}
+	if len(frames) != len(want) {
+		t.Fatalf("expected %d frames, got %d: %+v", len(want), len(frames), frames)
+	}
+	if frames[0].GetText() != "café" {
+		t.Errorf("expected café preserved intact across the chunk boundary, got %q", frames[0].GetText())
+	}
+}
+
+func TestStreamLogLines_TailWithoutTrailingNewlineFlushMultiFrame(t *testing.T) {
+	chunks := []string{"first\nsec", "ond-no-newline"}
+	frames := collectLogLinesMulti(t, chunks)
+	want := []string{"first", "second-no-newline"}
+	if len(frames) != len(want) {
+		t.Fatalf("expected %d frames (tail flushed without trailing newline), got %d: %+v", len(want), len(frames), frames)
+	}
+	if frames[1].GetText() != "second-no-newline" || !frames[1].GetIsFinal() {
+		t.Errorf("expected tail line flushed as final, got %+v", frames[1])
 	}
 }
 

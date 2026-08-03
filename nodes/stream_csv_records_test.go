@@ -1,6 +1,7 @@
 package nodes
 
 import (
+	"strings"
 	"testing"
 
 	gen "christiangeorgelucas/record-stream-tools/gen"
@@ -153,6 +154,90 @@ func TestStreamCsvRecords_VariableColumnCountIsNotAnError(t *testing.T) {
 	}
 	if len(frames[1].GetValues()) != 2 {
 		t.Errorf("expected row 2 to keep its own 2 values, got %#v", frames[1].GetValues())
+	}
+}
+
+// collectCsvMulti feeds text as SEVERAL input frames (config fields taken
+// only from the first) rather than one, exercising the v0.2.0 stateful
+// multi-frame path.
+func collectCsvMulti(t *testing.T, first *gen.CsvInput, restText []string) []*gen.CsvRecordFrame {
+	t.Helper()
+	in := make(chan *gen.CsvInput, 1+len(restText))
+	in <- first
+	for _, text := range restText {
+		in <- &gen.CsvInput{Text: text}
+	}
+	close(in)
+
+	var frames []*gen.CsvRecordFrame
+	if err := StreamCsvRecords(nil, nil, in, func(f *gen.CsvRecordFrame) error {
+		frames = append(frames, f)
+		return nil
+	}); err != nil {
+		t.Fatalf("StreamCsvRecords returned error: %v", err)
+	}
+	return frames
+}
+
+func TestStreamCsvRecords_RowSpansChunkBoundary(t *testing.T) {
+	// The second row's line is split mid-field across two frames.
+	first := &gen.CsvInput{Text: "name,age\nalice,3", HasHeader: true}
+	frames := collectCsvMulti(t, first, []string{"0\nbob,25\n"})
+	if len(frames) != 2 {
+		t.Fatalf("expected 2 frames, got %d: %+v", len(frames), frames)
+	}
+	if frames[0].GetFields()["age"] != "30" {
+		t.Errorf("expected the split row's age field reassembled as %q, got %q", "30", frames[0].GetFields()["age"])
+	}
+	if frames[1].GetFields()["name"] != "bob" || !frames[1].GetIsFinal() {
+		t.Errorf("unexpected second row: %+v", frames[1])
+	}
+}
+
+func TestStreamCsvRecords_QuotedNewlineSplitAcrossChunks(t *testing.T) {
+	// The embedded newline INSIDE a quoted field arrives in a separate frame
+	// from its opening quote — proves the csv.Reader genuinely blocks for
+	// more input rather than treating a frame boundary as end-of-document.
+	first := &gen.CsvInput{Text: "name,bio\n\"alice\",\"line one", HasHeader: true}
+	frames := collectCsvMulti(t, first, []string{"\nline two, still one field\"\nbob,short\n"})
+	if len(frames) != 2 {
+		t.Fatalf("expected 2 data rows (embedded newline must not split a row across the chunk boundary), got %d: %+v", len(frames), frames)
+	}
+	want := "line one\nline two, still one field"
+	if frames[0].GetFields()["bio"] != want {
+		t.Errorf("expected bio %q, got %q", want, frames[0].GetFields()["bio"])
+	}
+	if frames[1].GetFields()["name"] != "bob" || !frames[1].GetIsFinal() {
+		t.Errorf("unexpected second row: %+v", frames[1])
+	}
+}
+
+func TestStreamCsvRecords_UTF8RuneSplitAcrossChunks(t *testing.T) {
+	// Split the multi-byte 'é' (0xC3 0xA9) in "café" across two frames —
+	// byte-aligned, not rune-aligned, chunking (as StreamBody would do).
+	full := "city\ncafé\n"
+	splitAt := strings.Index(full, "\xc3") + 1
+	frames := collectCsvMulti(t, &gen.CsvInput{Text: full[:splitAt], HasHeader: true}, []string{full[splitAt:]})
+	if len(frames) != 1 {
+		t.Fatalf("expected 1 frame, got %d: %+v", len(frames), frames)
+	}
+	if frames[0].GetIsError() {
+		t.Fatalf("unexpected error (rune corrupted across chunk boundary): %q", frames[0].GetErrorMessage())
+	}
+	if frames[0].GetValues()[0] != "café" {
+		t.Errorf("expected café preserved intact, got %q", frames[0].GetValues()[0])
+	}
+}
+
+func TestStreamCsvRecords_LaterFrameConfigFieldsIgnored(t *testing.T) {
+	// has_header set on a LATER frame must be ignored: dialect is fixed from
+	// the first frame only.
+	frames := collectCsvMulti(t,
+		&gen.CsvInput{Text: "alice,30\n"},
+		[]string{""},
+	)
+	if len(frames) != 1 || len(frames[0].GetFields()) != 0 {
+		t.Fatalf("expected no header interpretation from a later frame, got %+v", frames)
 	}
 }
 

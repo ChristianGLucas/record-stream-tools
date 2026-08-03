@@ -1,30 +1,30 @@
 name: christiangeorgelucas/record-stream-tools
-version: 0.1.0
+version: 0.2.0
 language: go
-description: Incremental record-by-record streaming parsers for common wire formats (NDJSON, CSV, JSON arrays, log lines, SSE) — pipeline generator nodes that emit progressive frames instead of buffering a whole document.
+description: "Incremental record-by-record streaming parsers for common wire formats (NDJSON, CSV, JSON arrays, log lines, SSE) — pipeline generator nodes that consume a STREAM of input frames as one continuous document (parser state carried across frames, a record may span a chunk boundary, the tail is flushed on channel close) and emit progressive output frames instead of buffering a whole document. A single input frame (the whole document at once) behaves exactly as v0.1.x."
 nodes:
     - name: StreamNdjsonRecords
-      description: Parse newline-delimited JSON (NDJSON/JSONL) text and emit one frame per record in document order. A malformed line is reported as a per-line error frame and skipped (lines are independent); parsing continues with the next line. The last frame emitted has is_final=true.
+      description: "Parse newline-delimited JSON (NDJSON/JSONL) as a stream of input frames making up one continuous document — a record's line may span a chunk boundary — and emit one frame per record in document order. A malformed line is reported as a per-line error frame and skipped (lines are independent); parsing continues with the next line. The last frame emitted has is_final=true. Feeding the whole document as a single frame behaves exactly as v0.1.x."
       input: NdjsonInput
       output: NdjsonRecordFrame
       type: pipeline
     - name: StreamCsvRecords
-      description: Parse CSV (or other single-character-delimited) text and emit one frame per data row in document order, handling RFC 4180 quoting, embedded newlines inside quoted fields, CRLF/LF line endings, and a leading BOM. Optional header row populates a column-name map on every frame. A row-level syntax error is unrecoverable mid-document, so it is reported as a single error frame with is_final=true and parsing stops.
+      description: "Parse CSV (or other single-character-delimited) text as a stream of input frames making up one continuous document — a row, including a quoted field's embedded newline, may span a chunk boundary — and emit one frame per data row in document order, handling RFC 4180 quoting, CRLF/LF line endings, and a leading BOM. has_header/delimiter/trim_leading_space are read from the FIRST frame only. A row-level syntax error is unrecoverable mid-document, so it is reported as a single error frame with is_final=true and parsing stops. Feeding the whole document as a single frame behaves exactly as v0.1.x."
       input: CsvInput
       output: CsvRecordFrame
       type: pipeline
     - name: StreamJsonArrayItems
-      description: Tokenize a JSON document whose top-level value is an array and emit one frame per element as it is decoded — the array is never fully unmarshaled into memory before the first frame, so a large array streams progressively. A structural problem (not an array, or a malformed element) is unrecoverable mid-document, so it is reported as a single error frame with is_final=true and parsing stops.
+      description: "Tokenize a JSON document whose top-level value is an array, fed as a stream of input frames making up one continuous document — an element may span a chunk boundary — and emit one frame per element as it is decoded. A structural problem (not an array, or a malformed element) is unrecoverable mid-document, so it is reported as a single error frame with is_final=true and parsing stops. Feeding the whole document as a single frame behaves exactly as v0.1.x."
       input: JsonArrayInput
       output: JsonArrayItemFrame
       type: pipeline
     - name: StreamLogLines
-      description: Split raw multi-line text into individual lines and emit one frame per line, in order, with each line's 1-based line number and its terminator stripped. Every line, including empty ones, produces a frame; there is no malformed-line concept.
+      description: "Split raw multi-line text, fed as a stream of input frames making up one continuous document — a line may span a chunk boundary — into individual lines and emit one frame per line, in order, with each line's 1-based line number and its terminator stripped. Every line, including empty ones, produces a frame; there is no malformed-line concept. Feeding the whole document as a single frame behaves exactly as v0.1.x."
       input: LogLinesInput
       output: LogLineFrame
       type: pipeline
     - name: StreamSseEvents
-      description: Parse a raw text/event-stream (Server-Sent Events) transcript per the WHATWG SSE specification and emit one frame per dispatched event, with its id/event/data/retry fields. Unrecognized field names and comment lines are silently ignored per spec, so there is no error frame for this node — the format is total by design.
+      description: "Parse a raw text/event-stream (Server-Sent Events) transcript per the WHATWG SSE specification, fed as a stream of input frames making up one continuous transcript — an event's fields may span a chunk boundary — and emit one frame per dispatched event, with its id/event/data/retry fields. Unrecognized field names and comment lines are silently ignored per spec, so there is no error frame for this node. Feeding the whole transcript as a single frame behaves exactly as v0.1.x."
       input: SseInput
       output: SseEventFrame
       type: pipeline

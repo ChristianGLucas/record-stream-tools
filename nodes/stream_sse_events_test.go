@@ -1,6 +1,7 @@
 package nodes
 
 import (
+	"strings"
 	"testing"
 
 	gen "christiangeorgelucas/record-stream-tools/gen"
@@ -182,6 +183,74 @@ func TestStreamSseEvents_EmptyInputYieldsSingleFinalFrame(t *testing.T) {
 	}
 	if frames[0].GetData() != "" || frames[0].GetEvent() != "" {
 		t.Errorf("expected a zero-value frame for empty input, got %#v", frames[0])
+	}
+}
+
+// collectSseMulti feeds text as SEVERAL input frames rather than one,
+// exercising the v0.2.0 stateful multi-frame path.
+func collectSseMulti(t *testing.T, chunks []string) []*gen.SseEventFrame {
+	t.Helper()
+	in := make(chan *gen.SseInput, len(chunks))
+	for _, c := range chunks {
+		in <- &gen.SseInput{Text: c}
+	}
+	close(in)
+
+	var frames []*gen.SseEventFrame
+	if err := StreamSseEvents(nil, nil, in, func(f *gen.SseEventFrame) error {
+		frames = append(frames, f)
+		return nil
+	}); err != nil {
+		t.Fatalf("StreamSseEvents returned error: %v", err)
+	}
+	return frames
+}
+
+func TestStreamSseEvents_EventSpansChunkBoundary(t *testing.T) {
+	// The "data:" field's value is split mid-line across two frames.
+	chunks := []string{"data: hel", "lo\n\ndata: second\n\n"}
+	frames := collectSseMulti(t, chunks)
+	if len(frames) != 2 {
+		t.Fatalf("expected 2 events, got %d: %+v", len(frames), frames)
+	}
+	if frames[0].GetData() != "hello" {
+		t.Errorf("expected the split field value reassembled as %q, got %q", "hello", frames[0].GetData())
+	}
+	if !frames[1].GetIsFinal() {
+		t.Error("expected last frame final")
+	}
+}
+
+func TestStreamSseEvents_CRLFSplitAcrossChunkBoundary(t *testing.T) {
+	// The "\r" of a "\r\n" terminator lands as the LAST byte of one frame,
+	// its paired "\n" as the FIRST byte of the next — the exact ambiguous
+	// case sseLineSplitter's heldCR state exists for.
+	chunks := []string{"data: first\r", "\n\r\ndata: second\r\n\r\n"}
+	frames := collectSseMulti(t, chunks)
+	if len(frames) != 2 {
+		t.Fatalf("expected 2 events, got %d: %+v", len(frames), frames)
+	}
+	if frames[0].GetData() != "first" || frames[1].GetData() != "second" {
+		t.Fatalf("expected clean split data with no stray CR, got %q and %q", frames[0].GetData(), frames[1].GetData())
+	}
+
+	// Cross-check against the same transcript delivered as one N=1 frame.
+	whole := chunks[0] + chunks[1]
+	n1 := collectSse(t, whole)
+	if len(n1) != 2 || n1[0].GetData() != "first" || n1[1].GetData() != "second" {
+		t.Fatalf("N=1 reference run gave unexpected result: %+v", n1)
+	}
+}
+
+func TestStreamSseEvents_UTF8RuneSplitAcrossChunks(t *testing.T) {
+	full := "data: café\n\n"
+	splitAt := strings.Index(full, "\xc3") + 1
+	frames := collectSseMulti(t, []string{full[:splitAt], full[splitAt:]})
+	if len(frames) != 1 {
+		t.Fatalf("expected 1 event, got %d: %+v", len(frames), frames)
+	}
+	if frames[0].GetData() != "café" {
+		t.Errorf("expected café preserved intact across the chunk boundary, got %q", frames[0].GetData())
 	}
 }
 

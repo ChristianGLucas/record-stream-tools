@@ -1,6 +1,7 @@
 package nodes
 
 import (
+	"strings"
 	"testing"
 
 	gen "christiangeorgelucas/record-stream-tools/gen"
@@ -152,6 +153,95 @@ func TestStreamNdjsonRecords_BOMStripped(t *testing.T) {
 	}
 	if frames[0].GetJson() != `{"a":1}` {
 		t.Errorf("expected json %q, got %q", `{"a":1}`, frames[0].GetJson())
+	}
+}
+
+// collectNdjsonMulti feeds text as SEVERAL input frames (one per element of
+// chunks) rather than one, exercising the v0.2.0 stateful multi-frame path.
+func collectNdjsonMulti(t *testing.T, chunks []string) []*gen.NdjsonRecordFrame {
+	t.Helper()
+	in := make(chan *gen.NdjsonInput, len(chunks))
+	for _, c := range chunks {
+		in <- &gen.NdjsonInput{Text: c}
+	}
+	close(in)
+
+	var frames []*gen.NdjsonRecordFrame
+	if err := StreamNdjsonRecords(nil, nil, in, func(f *gen.NdjsonRecordFrame) error {
+		frames = append(frames, f)
+		return nil
+	}); err != nil {
+		t.Fatalf("StreamNdjsonRecords returned error: %v", err)
+	}
+	return frames
+}
+
+func TestStreamNdjsonRecords_RecordSpansChunkBoundary(t *testing.T) {
+	// The middle record's line is split mid-token across two frames.
+	chunks := []string{
+		"{\"a\":1}\n{\"a\":2, \"b\":",
+		"\"tail\"}\n{\"a\":3}\n",
+	}
+	frames := collectNdjsonMulti(t, chunks)
+	if len(frames) != 3 {
+		t.Fatalf("expected 3 frames, got %d: %+v", len(frames), frames)
+	}
+	for i, f := range frames {
+		if f.GetIsError() {
+			t.Fatalf("frame %d unexpectedly an error: %q", i, f.GetErrorMessage())
+		}
+	}
+	if frames[1].GetJson() != `{"a":2, "b":"tail"}` {
+		t.Errorf("expected the split record reassembled, got %q", frames[1].GetJson())
+	}
+	if !frames[2].GetIsFinal() {
+		t.Error("expected last frame final")
+	}
+
+	// Cross-check against the same document delivered as a single N=1 frame:
+	// splitting into frames must never change the parsed result.
+	whole := chunks[0] + chunks[1]
+	n1 := collectNdjson(t, whole)
+	if len(n1) != len(frames) {
+		t.Fatalf("N=1 vs multi-frame frame count differs: %d vs %d", len(n1), len(frames))
+	}
+	for i := range n1 {
+		if n1[i].GetJson() != frames[i].GetJson() || n1[i].GetLineNumber() != frames[i].GetLineNumber() {
+			t.Errorf("frame %d differs between N=1 and multi-frame: %+v vs %+v", i, n1[i], frames[i])
+		}
+	}
+}
+
+func TestStreamNdjsonRecords_UTF8RuneSplitAcrossChunks(t *testing.T) {
+	// "café" JSON-encoded as a string; split the multi-byte 'é' (0xC3 0xA9)
+	// across two frames — StreamBody-style byte-aligned, not rune-aligned,
+	// chunking. The split lands strictly inside the JSON string content, not
+	// on the delimiting '\n', which per lineSplitter's design is the only
+	// byte it ever treats specially.
+	full := `{"name":"café"}` + "\n"
+	splitAt := strings.Index(full, "\xc3") + 1 // split between the two bytes of 'é'
+	chunks := []string{full[:splitAt], full[splitAt:]}
+
+	frames := collectNdjsonMulti(t, chunks)
+	if len(frames) != 1 {
+		t.Fatalf("expected 1 frame, got %d: %+v", len(frames), frames)
+	}
+	if frames[0].GetIsError() {
+		t.Fatalf("unexpected error (rune corrupted across chunk boundary): %q", frames[0].GetErrorMessage())
+	}
+	if frames[0].GetJson() != `{"name":"café"}` {
+		t.Errorf("expected café preserved intact, got %q", frames[0].GetJson())
+	}
+}
+
+func TestStreamNdjsonRecords_TailWithoutTrailingNewlineFlushMultiFrame(t *testing.T) {
+	chunks := []string{"{\"a\":1}\n{\"a\":2}", ""} // no trailing newline; delivered as 2 frames
+	frames := collectNdjsonMulti(t, chunks)
+	if len(frames) != 2 {
+		t.Fatalf("expected 2 frames (tail flushed without trailing newline), got %d: %+v", len(frames), frames)
+	}
+	if frames[1].GetJson() != `{"a":2}` || !frames[1].GetIsFinal() {
+		t.Errorf("expected tail record flushed as final, got %+v", frames[1])
 	}
 }
 

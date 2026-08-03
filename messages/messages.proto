@@ -28,11 +28,21 @@ option go_package = ".;gen";
 // Newline-delimited JSON (NDJSON/JSONL) text to parse record-by-record. Each
 // non-blank line is expected to be one complete JSON value (object, array,
 // string, number, bool, or null); blank lines are skipped and never produce
-// a frame.
+// a frame. StreamNdjsonRecords consumes a STREAM of these as one continuous
+// document (v0.2.0): parser state (byte accumulator, running line number)
+// carries across every frame received in one node invocation, so a
+// record's line may span a chunk boundary, and any trailing partial line
+// is flushed once the input channel closes. A single frame carrying the
+// whole document (N=1) behaves exactly as v0.1.x.
 message NdjsonInput {
-  // The full NDJSON/JSONL document text, UTF-8. Lines may be separated by
-  // "\n" or "\r\n"; a leading UTF-8 BOM and a trailing newline are both
-  // tolerated.
+  // A CHUNK of the NDJSON/JSONL document's raw bytes, UTF-8. Successive
+  // frames' text is CONCATENATED byte-for-byte to reconstruct the full
+  // document — chunk boundaries need not fall on line boundaries, and a
+  // multi-byte UTF-8 rune may be split across two frames (byte-aligned
+  // chunking, e.g. from http-tools' StreamBody, is not rune-aligned); do
+  // NOT decode/validate a single frame's text in isolation. Lines may be
+  // separated by "\n" or "\r\n"; a leading UTF-8 BOM (checked only on the
+  // very first frame) and a trailing newline are both tolerated.
   string text = 1;
 }
 
@@ -68,19 +78,32 @@ message NdjsonRecordFrame {
 
 // CSV (or other delimited-text) document to parse row-by-row. Handles
 // RFC 4180 quoting, embedded newlines inside quoted fields, CRLF and LF line
-// endings, and a leading UTF-8 BOM.
+// endings, and a leading UTF-8 BOM. StreamCsvRecords consumes a STREAM of
+// these as one continuous document (v0.2.0): the underlying csv.Reader is
+// driven directly off the input channel, so a row — including a quoted
+// field's embedded newline — may span a chunk boundary. A single frame
+// carrying the whole document (N=1) behaves exactly as v0.1.x.
 message CsvInput {
-  // The full CSV document text, UTF-8.
+  // A CHUNK of the CSV document's raw bytes, UTF-8. Successive frames' text
+  // is CONCATENATED byte-for-byte to reconstruct the full document — chunk
+  // boundaries need not fall on row/field boundaries, and a multi-byte
+  // UTF-8 rune may be split across two frames; do NOT decode/validate a
+  // single frame's text in isolation. A leading UTF-8 BOM is checked only
+  // on the very first frame.
   string text = 1;
   // Field delimiter as a single character. Empty means the default ",".
+  // Read from the FIRST frame only; ignored on any later frame — a
+  // document's dialect cannot change mid-stream.
   string delimiter = 2;
   // When true, the first row is treated as a header and used to populate
   // each subsequent frame's `fields` map by column name. Defaults to false
   // (proto3 zero value): every row, including the first, is then a data row
-  // and `fields` is left empty on every frame — use `values` instead.
+  // and `fields` is left empty on every frame — use `values` instead. Read
+  // from the FIRST frame only; ignored on any later frame.
   bool has_header = 3;
   // When true, leading whitespace in each field is trimmed (encoding/csv's
   // TrimLeadingSpace option). Defaults to false (whitespace preserved).
+  // Read from the FIRST frame only; ignored on any later frame.
   bool trim_leading_space = 4;
 }
 
@@ -125,11 +148,19 @@ message CsvRecordFrame {
 // A JSON document whose top-level value is expected to be an array. Elements
 // are tokenized and emitted one at a time as they are decoded — the document
 // is never fully unmarshaled into memory before the first frame is emitted,
-// so a large array streams progressively.
+// so a large array streams progressively. StreamJsonArrayItems consumes a
+// STREAM of these as one continuous document (v0.2.0): the underlying
+// json.Decoder is driven directly off the input channel, so an element may
+// span a chunk boundary. A single frame carrying the whole document (N=1)
+// behaves exactly as v0.1.x.
 message JsonArrayInput {
-  // The full JSON document text, UTF-8. Whitespace-only or empty text is
-  // treated as "nothing to stream" (see JsonArrayItemFrame.is_final), not an
-  // error.
+  // A CHUNK of the JSON document's raw bytes, UTF-8. Successive frames'
+  // text is CONCATENATED byte-for-byte to reconstruct the full document —
+  // chunk boundaries need not fall on token boundaries, and a multi-byte
+  // UTF-8 rune may be split across two frames; do NOT decode/validate a
+  // single frame's text in isolation. Whitespace-only or empty text overall
+  // is treated as "nothing to stream" (see JsonArrayItemFrame.is_final),
+  // not an error.
   string text = 1;
 }
 
@@ -161,10 +192,20 @@ message JsonArrayItemFrame {
 // ---------------------------------------------------------------------------
 
 // Raw multi-line text (e.g. a log file) to split into individual lines.
+// StreamLogLines consumes a STREAM of these as one continuous document
+// (v0.2.0): the byte accumulator and running line number carry across every
+// frame received in one node invocation, so a line may span a chunk
+// boundary. A single frame carrying the whole document (N=1) behaves
+// exactly as v0.1.x.
 message LogLinesInput {
-  // The full text, UTF-8. Lines may be separated by "\n" or "\r\n"; a
-  // leading UTF-8 BOM is tolerated. There is no concept of a malformed line
-  // — every line, including an empty one, produces a frame.
+  // A CHUNK of the text's raw bytes, UTF-8. Successive frames' text is
+  // CONCATENATED byte-for-byte to reconstruct the full document — chunk
+  // boundaries need not fall on line boundaries, and a multi-byte UTF-8
+  // rune may be split across two frames; do NOT decode/validate a single
+  // frame's text in isolation. Lines may be separated by "\n" or "\r\n"; a
+  // leading UTF-8 BOM (checked only on the very first frame) is tolerated.
+  // There is no concept of a malformed line — every line, including an
+  // empty one, produces a frame.
   string text = 1;
 }
 
@@ -192,8 +233,18 @@ message LogLineFrame {
 
 // A raw text/event-stream transcript (Server-Sent Events wire format) to
 // parse into individual events per the WHATWG SSE specification.
+// StreamSseEvents consumes a STREAM of these as one continuous transcript
+// (v0.2.0): the pending id/event/data/retry field buffers carry across
+// every frame received in one node invocation, so an event's fields may
+// span a chunk boundary — including "\r\n" split as a bare "\r" at the end
+// of one frame and "\n" at the start of the next. A single frame carrying
+// the whole transcript (N=1) behaves exactly as v0.1.x.
 message SseInput {
-  // The full event-stream transcript text, UTF-8.
+  // A CHUNK of the transcript's raw bytes, UTF-8. Successive frames' text
+  // is CONCATENATED byte-for-byte to reconstruct the full transcript —
+  // chunk boundaries need not fall on line boundaries, and a multi-byte
+  // UTF-8 rune may be split across two frames; do NOT decode/validate a
+  // single frame's text in isolation.
   string text = 1;
 }
 

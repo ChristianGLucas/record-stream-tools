@@ -4,33 +4,60 @@ import (
 	"context"
 	"encoding/csv"
 	"io"
-	"strings"
 
 	"christiangeorgelucas/record-stream-tools/axiom"
 	gen "christiangeorgelucas/record-stream-tools/gen"
 )
 
-// StreamCsvRecords parses CSV text and emits one CsvRecordFrame per data
-// row, in document order, using Go's encoding/csv (RFC 4180 quoting,
-// embedded newlines inside quoted fields, and both CRLF/LF line endings are
-// all handled by the standard library, not re-derived here). A row-level
-// syntax error (e.g. an unterminated quoted field) is unrecoverable
-// mid-document — byte alignment after such an error is not well-defined —
-// so it is reported as a single error frame with is_final=true and parsing
-// stops for that input.
+// StreamCsvRecords parses CSV text as a STREAM of input frames making up ONE
+// continuous document: it drives Go's encoding/csv.Reader directly off the
+// input channel (via a small io.Reader adapter that blocks for the next
+// frame exactly as it would reading a real network stream), so RFC 4180
+// quoting — including a quoted field's embedded newline — is handled
+// correctly even when the quote's closing character arrives in a LATER
+// frame than its opening character. CRLF/LF line endings and a leading BOM
+// are handled by the standard library, not re-derived here.
+//
+// has_header / delimiter / trim_leading_space are read ONLY from the FIRST
+// frame received; the same fields on any later frame are ignored (a
+// document's dialect cannot change mid-stream). Frame boundaries never
+// affect the result: splitting a document into 1 frame or many produces
+// byte-identical output — the N=1 case behaves EXACTLY as 0.1.x.
+//
+// A row-level syntax error (e.g. an unterminated quoted field) is
+// unrecoverable mid-document — byte alignment after such an error is not
+// well-defined — so it is reported as a single error frame with
+// is_final=true and parsing stops for that input. A request channel closed
+// with ZERO frames emits nothing (not even a terminal frame) and simply
+// returns.
 func StreamCsvRecords(ctx context.Context, ax axiom.Context, in <-chan *gen.CsvInput, emit func(*gen.CsvRecordFrame) error) error {
-	for input := range in {
-		if err := streamCsvOne(input, emit); err != nil {
-			return err
-		}
+	first, ok := <-in
+	if !ok {
+		return nil
 	}
-	return nil
+	delimiter := first.GetDelimiter()
+	hasHeader := first.GetHasHeader()
+	trimLeadingSpace := first.GetTrimLeadingSpace()
+	firstText := stripBOM(first.GetText())
+
+	consumedFirst := false
+	reader := newChunkReader(func() (string, bool) {
+		if !consumedFirst {
+			consumedFirst = true
+			return firstText, true
+		}
+		v, ok := <-in
+		if !ok {
+			return "", false
+		}
+		return v.GetText(), true
+	})
+
+	return streamCsv(reader, delimiter, hasHeader, trimLeadingSpace, emit)
 }
 
-func streamCsvOne(input *gen.CsvInput, emit func(*gen.CsvRecordFrame) error) error {
-	text := stripBOM(input.GetText())
-
-	if delim := input.GetDelimiter(); len([]rune(delim)) > 1 {
+func streamCsv(r io.Reader, delimiter string, hasHeader, trimLeadingSpace bool, emit func(*gen.CsvRecordFrame) error) error {
+	if len([]rune(delimiter)) > 1 {
 		return emit(&gen.CsvRecordFrame{
 			IsError:      true,
 			ErrorMessage: "delimiter must be a single character",
@@ -38,16 +65,16 @@ func streamCsvOne(input *gen.CsvInput, emit func(*gen.CsvRecordFrame) error) err
 		})
 	}
 
-	r := csv.NewReader(strings.NewReader(text))
-	r.FieldsPerRecord = -1 // a row with a different column count is not an error
-	r.TrimLeadingSpace = input.GetTrimLeadingSpace()
-	if delim := input.GetDelimiter(); delim != "" {
-		r.Comma = []rune(delim)[0]
+	cr := csv.NewReader(r)
+	cr.FieldsPerRecord = -1 // a row with a different column count is not an error
+	cr.TrimLeadingSpace = trimLeadingSpace
+	if delimiter != "" {
+		cr.Comma = []rune(delimiter)[0]
 	}
 
 	var header []string
-	if input.GetHasHeader() {
-		h, err := r.Read()
+	if hasHeader {
+		h, err := cr.Read()
 		if err == io.EOF {
 			// header-only-or-empty document: nothing to stream.
 			return emit(&gen.CsvRecordFrame{IsFinal: true})
@@ -64,7 +91,7 @@ func streamCsvOne(input *gen.CsvInput, emit func(*gen.CsvRecordFrame) error) err
 
 	// 1-row lookahead: we only know a frame is the last one once the next
 	// Read() call tells us there is nothing more.
-	cur, curErr := r.Read()
+	cur, curErr := cr.Read()
 	rowNum := int32(1)
 	idx := int32(0)
 	if curErr == io.EOF {
@@ -82,7 +109,7 @@ func streamCsvOne(input *gen.CsvInput, emit func(*gen.CsvRecordFrame) error) err
 			})
 		}
 
-		next, nextErr := r.Read()
+		next, nextErr := cr.Read()
 		isFinal := nextErr == io.EOF
 
 		frame := &gen.CsvRecordFrame{
